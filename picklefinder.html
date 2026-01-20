@@ -6,32 +6,39 @@
 <title>PickleFinder</title>
 
 <style>
-body{font-family:system-ui,-apple-system,Segoe UI,Roboto;background:#f7f9fc;margin:0;padding:20px}
-.card{background:#fff;border-radius:12px;padding:16px;margin-bottom:14px;max-width:980px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
-h1{margin:0 0 6px}
-.sub{font-size:13px;color:#555;margin-bottom:14px}
-input{font-size:22px;padding:10px;width:100%;border-radius:10px;border:1px solid #ccc}
-.bin{font-size:56px;font-weight:800;margin:12px 0}
-.badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:700}
-.good{background:#dcfce7;color:#166534}
-.bad{background:#fee2e2;color:#7f1d1d}
-table{width:100%;border-collapse:collapse;margin-top:10px;font-size:14px}
-th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left}
-tbody tr:nth-child(even){background:#f9fafb}
-button{padding:8px 12px;border-radius:8px;border:1px solid #ccc;font-weight:700;cursor:pointer}
-.hidden{display:none}
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto;background:#f7f9fc;margin:0;padding:20px}
+  .card{background:#fff;border-radius:12px;padding:16px;margin-bottom:14px;max-width:980px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+  h1{margin:0 0 6px}
+  .sub{font-size:13px;color:#555;margin:0 0 14px}
+  input{font-size:22px;padding:10px;width:100%;border-radius:10px;border:1px solid #ccc;box-sizing:border-box}
+  .bin{font-size:56px;font-weight:800;margin:12px 0}
+  .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:700;vertical-align:middle}
+  .good{background:#dcfce7;color:#166534}
+  .bad{background:#fee2e2;color:#7f1d1d}
+  table{width:100%;border-collapse:collapse;margin-top:10px;font-size:14px}
+  th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left}
+  tbody tr:nth-child(even){background:#f9fafb}
+  button{padding:8px 12px;border-radius:8px;border:1px solid #ccc;font-weight:700;cursor:pointer;background:#fff}
+  button:active{transform:translateY(1px)}
+  .meta{margin-top:8px;font-size:13px;color:#444;line-height:1.35}
+  .meta strong{color:#111}
+  code{background:#f3f4f6;padding:1px 6px;border-radius:6px}
 </style>
 </head>
 
 <body>
 
 <h1>PickleFinder</h1>
-<p class="sub">Auto-loads <strong>bin-locations.csv</strong> from this site</p>
+<p class="sub">
+  Auto-loads <strong>bin-locations.csv</strong> from this site and shows when that file was last updated.
+</p>
 
 <div class="card">
-  <div id="status"><span class="badge bad">Not loaded</span></div>
-  <button onclick="loadCSV()">Reload from site</button>
-  <input id="fileInput" type="file" accept=".csv" class="hidden">
+  <div id="status"><span class="badge bad">Not loaded</span> Waiting…</div>
+  <div id="meta" class="meta"></div>
+  <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">
+    <button onclick="loadCSV()">Reload from site</button>
+  </div>
 </div>
 
 <div class="card">
@@ -48,71 +55,135 @@ button{padding:8px 12px;border-radius:8px;border:1px solid #ccc;font-weight:700;
 </div>
 
 <script>
-const CSV_URL = './bin-locations.csv';
-const COL_BARCODE = 'Variant Barcode';
-const COL_SKU = 'Variant SKU';
-const COL_TITLE = 'Title';
-const COL_BIN = 'Variant Metafield: custom.wh_bin [single_line_text_field]';
+  const CSV_URL = './bin-locations.csv';
 
-let rows = [];
+  // Shopify/Matrixify header names (edit if yours differ)
+  const COL_BARCODE = 'Variant Barcode';
+  const COL_SKU = 'Variant SKU';
+  const COL_TITLE = 'Title';
+  const COL_BIN = 'Variant Metafield: custom.wh_bin [single_line_text_field]';
 
-function parseCSV(text){
-  const lines = text.split(/\r?\n/).filter(l => l.trim() !== '');
-  const headers = lines.shift().split(',').map(h => h.replace(/^"|"$/g,''));
-  return lines.map(l => {
-    const cells = l.split(',').map(c => c.replace(/^"|"$/g,''));
-    let o = {};
-    headers.forEach((h,i)=>o[h]=cells[i]||'');
-    return o;
+  let rows = [];
+
+  function parseCSV(text){
+    // Simple, forgiving parser (works with “real” exports most of the time)
+    const lines = text.split(/\r?\n/).filter(l => l.trim() !== '');
+    if (!lines.length) return [];
+
+    const headers = lines.shift().split(',').map(h => h.replace(/^\uFEFF/, '').replace(/^"|"$/g,''));
+    return lines.map(l => {
+      const cells = l.split(',').map(c => c.replace(/^"|"$/g,''));
+      const o = {};
+      headers.forEach((h,i)=>o[h]=cells[i]||'');
+      return o;
+    });
+  }
+
+  function setStatus(ok, msg){
+    document.getElementById('status').innerHTML =
+      `<span class="badge ${ok ? 'good' : 'bad'}">${ok ? 'Loaded' : 'Failed'}</span> ${msg}`;
+  }
+
+  function setMeta(html){
+    document.getElementById('meta').innerHTML = html || '';
+  }
+
+  function fmtDate(d){
+    try{
+      return new Date(d).toLocaleString();
+    }catch{
+      return String(d || '');
+    }
+  }
+
+  async function loadCSV(){
+    setStatus(false, 'Loading…');
+    setMeta('');
+
+    try{
+      // Cache bust so you see updates immediately after pushing new CSV to GitHub
+      const url = CSV_URL + '?v=' + Date.now();
+      const res = await fetch(url, { cache: 'no-store' });
+
+      if(!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      // This is the key: GitHub Pages typically provides this header
+      const lastModified = res.headers.get('last-modified'); // e.g. "Tue, 21 Jan 2026 15:04:10 GMT"
+      const etag = res.headers.get('etag');
+
+      const text = await res.text();
+      rows = parseCSV(text);
+
+      setStatus(true, `Parsed ${rows.length} rows`);
+      setMeta(`
+        <div><strong>CSV Last Updated (server):</strong> ${lastModified ? fmtDate(lastModified) : '<span style="color:#7f1d1d;">Unknown</span>'}</div>
+        <div><strong>Loaded at (this device):</strong> ${new Date().toLocaleString()}</div>
+        ${etag ? `<div><strong>ETag:</strong> <code>${etag}</code></div>` : ''}
+      `);
+
+    }catch(e){
+      setStatus(false, `Couldn’t load <code>${CSV_URL}</code> — ${e.message}`);
+      setMeta(`<div style="color:#7f1d1d;"><strong>Tip:</strong> Open <code>${CSV_URL}</code> in a browser tab to confirm it exists.</div>`);
+    }
+  }
+
+  document.getElementById('scan').addEventListener('keydown', e=>{
+    if(e.key==='Enter'){
+      const q = e.target.value.trim();
+      e.target.value='';
+      lookup(q);
+      setTimeout(()=>document.getElementById('scan').focus(), 50);
+    }
   });
-}
 
-async function loadCSV(){
-  try{
-    const r = await fetch(CSV_URL + '?v=' + Date.now(), {cache:'no-store'});
-    const t = await r.text();
-    rows = parseCSV(t);
-    document.getElementById('status').innerHTML =
-      `<span class="badge good">Loaded</span> Parsed ${rows.length} rows`;
-  }catch(e){
-    document.getElementById('status').innerHTML =
-      `<span class="badge bad">Failed</span> ${e.message}`;
+  function esc(s){
+    return String(s ?? '')
+      .replace(/&/g,'&amp;')
+      .replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;')
+      .replace(/"/g,'&quot;');
   }
-}
 
-document.getElementById('scan').addEventListener('keydown', e=>{
-  if(e.key==='Enter'){
-    const q = e.target.value.trim();
-    e.target.value='';
-    lookup(q);
+  function lookup(q){
+    if(!rows.length){
+      document.getElementById('result').innerHTML =
+        `<div class="badge bad">Not ready</div> Load the CSV first.`;
+      return;
+    }
+
+    const m = rows.find(r => (r[COL_BARCODE] && r[COL_BARCODE]===q) || (r[COL_SKU] && r[COL_SKU]===q));
+    if(!m){
+      document.getElementById('result').innerHTML='<div class="badge bad">Not found</div>';
+      return;
+    }
+
+    document.getElementById('result').innerHTML=
+      `<div class="bin">${esc(m[COL_BIN]||'—')}</div>
+       <div><strong>${esc(m[COL_TITLE]||'')}</strong></div>
+       <div style="margin-top:6px;color:#444;font-size:14px;">
+         <strong>Barcode:</strong> ${esc(m[COL_BARCODE]||'')} &nbsp; | &nbsp;
+         <strong>SKU:</strong> ${esc(m[COL_SKU]||'')}
+       </div>`;
+
+    addLog(m);
   }
-});
 
-function lookup(q){
-  const m = rows.find(r => r[COL_BARCODE]===q || r[COL_SKU]===q);
-  if(!m){
-    document.getElementById('result').innerHTML='<div class="badge bad">Not found</div>';
-    return;
+  function addLog(m){
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      `<td>${esc(new Date().toLocaleTimeString())}</td>
+       <td>${esc(m[COL_BIN]||'')}</td>
+       <td>${esc(m[COL_BARCODE]||'')}</td>
+       <td>${esc(m[COL_TITLE]||'')}</td>`;
+    document.getElementById('log').prepend(tr);
   }
-  document.getElementById('result').innerHTML=
-    `<div class="bin">${m[COL_BIN]||'—'}</div>
-     <div><strong>${m[COL_TITLE]||''}</strong></div>`;
-  addLog(m);
-}
 
-function addLog(m){
-  const tr = document.createElement('tr');
-  tr.innerHTML =
-    `<td>${new Date().toLocaleTimeString()}</td>
-     <td>${m[COL_BIN]||''}</td>
-     <td>${m[COL_BARCODE]||''}</td>
-     <td>${m[COL_TITLE]||''}</td>`;
-  document.getElementById('log').prepend(tr);
-}
+  function clearLog(){
+    document.getElementById('log').innerHTML='';
+  }
 
-function clearLog(){ document.getElementById('log').innerHTML=''; }
-
-loadCSV();
+  // boot
+  loadCSV();
 </script>
 
 </body>
