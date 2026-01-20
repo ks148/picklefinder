@@ -317,13 +317,13 @@
         rows = objects;
 
         const now = new Date();
-        setLoadStatus(true, `Loaded ${rows.length.toLocaleString()} rows`, `Source: bin_locations.csv • ${now.toLocaleString()}`);
+        setLoadStatus(true, `Loaded ${rows.length.toLocaleString()} rows`, `Source: bin-locations.csv • ${now.toLocaleString()}`);
 
         resultDiv.innerHTML = '';
         focusScan();
       }catch(err){
         console.error(err);
-        setLoadStatus(false, 'Auto-load failed', `Couldn’t fetch bin_locations.csv (${err.message}). Use Manual Upload.`);
+        setLoadStatus(false, 'Auto-load failed', `Couldn’t fetch bin-locations.csv (${err.message}). Use Manual Upload.`);
         showUploader(true);
         focusScan();
       }
