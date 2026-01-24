@@ -6,14 +6,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 
 <style>
-  body{font-family:system-ui;background:#f7f9fc;padding:20px}
-  .card{background:#fff;border-radius:12px;padding:16px;margin-bottom:16px;box-shadow:0 2px 8px rgba(0,0,0,.06);max-width:1200px}
+  body{font-family:system-ui;background:#f7f9fc;padding:20px;margin:0}
+  .card{background:#fff;border-radius:12px;padding:16px;margin:0 0 16px 0;box-shadow:0 2px 8px rgba(0,0,0,.06);max-width:1200px}
   h1{margin:0 0 6px}
   .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
   select,button{padding:9px 12px;font-size:14px;border-radius:10px;border:1px solid #cbd5e1;background:#fff;font-weight:700}
   button{cursor:pointer}
   button.primary{background:#2563eb;border-color:#2563eb;color:#fff}
-  input[type="file"]{font-size:14px}
   .badge{display:inline-block;font-size:12px;font-weight:800;padding:2px 10px;border-radius:999px}
   .good{background:#dcfce7;color:#166534}
   .bad{background:#fee2e2;color:#7f1d1d}
@@ -23,35 +22,51 @@
   thead th{background:#f1f5f9;position:sticky;top:0}
   tbody tr:nth-child(even){background:#f8fafc}
   code{background:#f1f5f9;padding:2px 6px;border-radius:8px}
+
+  .topnav{
+    display:flex; gap:10px; align-items:center;
+    padding:10px 12px; margin:0 0 14px 0;
+    background:#fff; border:1px solid #e2e8f0;
+    border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,.06);
+    max-width:1200px;
+  }
+  .topnav a{
+    text-decoration:none; font-weight:800; color:#0f172a;
+    padding:8px 10px; border-radius:10px;
+  }
+  .topnav a:hover{ background:#f1f5f9; }
+  .topnav .active{ background:#e2e8f0; }
 </style>
 </head>
 
 <body>
 
+<nav class="topnav">
+  <a href="./picklefinder.html">🥒 PickleFinder</a>
+  <a class="active" href="./pickle24.html">📦 Pickle24</a>
+  <a href="./index.html">🏠 Home</a>
+</nav>
+
 <h1>Pickle24</h1>
 <p class="muted">
-  Transfer pick builder. Logic: if <code>Destination On Hand &lt; Destination Min</code>, pick up to
-  <code>(Dest Max − Dest On Hand)</code> limited by <code>Source Available</code>.
+  Auto-loads <strong>pickle-data.csv</strong>. Trigger: <code>Dest On Hand &lt; Dest Min</code>. Pick fills to max, limited by source availability.
 </p>
 
 <div class="card">
-  <div class="row">
-    <div style="flex:2">
-      <div style="font-weight:900;margin-bottom:6px">1) Upload your CSV</div>
-      <input type="file" id="csvFile" accept=".csv,.txt" />
-      <div class="muted" style="margin-top:6px">
-        This parser supports quoted fields and commas inside titles.
-      </div>
+  <div class="row" style="justify-content:space-between">
+    <div>
+      <div id="status"><span class="badge bad">Not loaded</span> Waiting…</div>
+      <div id="meta" class="muted" style="margin-top:6px"></div>
     </div>
-    <div style="flex:1;min-width:320px">
-      <div id="status"><span class="badge bad">No file loaded</span></div>
-      <div id="diag" class="muted" style="margin-top:6px"></div>
+    <div class="row">
+      <button type="button" onclick="loadCSV()">Reload from site</button>
+      <button type="button" onclick="openCSV()">Open CSV</button>
     </div>
   </div>
 </div>
 
 <div class="card">
-  <div style="font-weight:900;margin-bottom:10px">2) Choose transfer lanes</div>
+  <div style="font-weight:900;margin-bottom:10px">Choose transfer lanes</div>
   <div class="row">
     <label style="font-weight:800">Pick FROM:</label>
     <select id="fromLoc">
@@ -100,352 +115,248 @@
 </div>
 
 <script>
-/* -----------------------------
-   Robust CSV utilities
-------------------------------*/
-function detectDelimiter(text) {
-  const firstLine = (text.split(/\r?\n/).find(l => l.trim() !== '') || '');
-  const candidates = [',',';','\t','|'];
-  let best = ',', bestCount = -1;
-  for (const d of candidates) {
-    const c = firstLine.split(d).length;
-    if (c > bestCount) { bestCount = c; best = d; }
+  // ✅ Shared repo file
+  const CSV_URL = './pickle-data.csv';
+
+  // Your exact headers
+  const COL_BARCODE = 'Variant Barcode';
+  const COL_SKU = 'Variant SKU';
+  const COL_TITLE = 'Title';
+  const COL_OPT1 = 'Option1 Value';
+  const COL_OPT2 = 'Option2 Value';
+  const COL_WH_BIN = 'Variant Metafield: custom.wh_bin [single_line_text_field]';
+
+  const COL_PLY_ON = 'Inventory Available: Plymouth';
+  const COL_GH_ON  = 'Inventory Available: Green Harbor';
+  const COL_WH_AV  = 'Inventory Available: Warehouse-66';
+
+  const COL_PLY_MIN = 'Variant Metafield: custom.minply [number_integer]';
+  const COL_PLY_MAX = 'Variant Metafield: custom.maxply [number_integer]';
+  const COL_GH_MIN  = 'Variant Metafield: custom.mingh [number_integer]';
+  const COL_GH_MAX  = 'Variant Metafield: custom.maxgh [number_integer]';
+
+  let rows = [];
+  let lastPick = [];
+
+  const statusEl = document.getElementById('status');
+  const metaEl = document.getElementById('meta');
+  const resultsEl = document.getElementById('results');
+  const summaryEl = document.getElementById('summary');
+
+  function setStatus(ok, msg){
+    statusEl.innerHTML = `<span class="badge ${ok ? 'good' : 'bad'}">${ok ? 'Loaded' : 'Failed'}</span> ${msg}`;
   }
-  return best;
-}
+  function setMeta(html){ metaEl.innerHTML = html || ''; }
+  function fmtDate(d){ try{ return new Date(d).toLocaleString(); } catch { return String(d||''); } }
 
-// Proper CSV parser: supports quotes, commas inside quotes, CRLF/LF
-function parseCSV(text, delimiter) {
-  const rows = [];
-  let i = 0, field = '', row = [], inQuotes = false;
-
-  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
-
-  while (i < text.length) {
-    const c = text[i];
-
-    if (c === '"') {
-      if (inQuotes && text[i+1] === '"') { field += '"'; i++; }
-      else { inQuotes = !inQuotes; }
-    } else if (c === delimiter && !inQuotes) {
-      row.push(field); field = '';
-    } else if ((c === '\n' || c === '\r') && !inQuotes) {
-      if (field !== '' || row.length) {
-        row.push(field);
-        rows.push(row);
-        row = [];
-        field = '';
-      }
-      if (c === '\r' && text[i+1] === '\n') i++;
-    } else {
-      field += c;
+  function detectDelimiter(text) {
+    const firstLine = (text.split(/\r?\n/).find(l => l.trim() !== '') || '');
+    const candidates = [',',';','\t','|'];
+    let best = ',', bestCount = -1;
+    for (const d of candidates) {
+      const c = firstLine.split(d).length;
+      if (c > bestCount) { bestCount = c; best = d; }
     }
-    i++;
+    return best;
   }
-  if (field !== '' || row.length) { row.push(field); rows.push(row); }
-  return rows;
-}
+  function parseCSV(text, delimiter) {
+    const out = [];
+    let i = 0, field = '', row = [], inQuotes = false;
 
-function toObjects(matrix) {
-  if (!matrix.length) return { headers: [], objects: [] };
-  const headers = (matrix[0] || []).map(h => String(h ?? '').trim());
-  const objects = [];
-  for (let r = 1; r < matrix.length; r++) {
-    const line = matrix[r];
-    if (!line || !line.length) continue;
-    if (line.join('').trim() === '') continue;
-    const obj = {};
-    for (let c = 0; c < headers.length; c++) obj[headers[c]] = (line[c] ?? '').trim();
-    objects.push(obj);
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+
+    while (i < text.length) {
+      const c = text[i];
+      if (c === '"') {
+        if (inQuotes && text[i+1] === '"') { field += '"'; i++; }
+        else { inQuotes = !inQuotes; }
+      } else if (c === delimiter && !inQuotes) {
+        row.push(field); field = '';
+      } else if ((c === '\n' || c === '\r') && !inQuotes) {
+        if (field !== '' || row.length) { row.push(field); out.push(row); row = []; field = ''; }
+        if (c === '\r' && text[i+1] === '\n') i++;
+      } else {
+        field += c;
+      }
+      i++;
+    }
+    if (field !== '' || row.length) { row.push(field); out.push(row); }
+    return out;
   }
-  return { headers, objects };
-}
-
-function makeHeaderMap(headers) {
-  const map = new Map();
-  for (const h of headers) map.set(h.toLowerCase(), h);
-  return map;
-}
-
-function firstExisting(headerMap, candidates) {
-  for (const c of candidates) {
-    const key = c.toLowerCase();
-    if (headerMap.has(key)) return headerMap.get(key);
+  function toObjects(matrix) {
+    if (!matrix.length) return [];
+    const headers = (matrix[0] || []).map(h => String(h ?? '').trim());
+    const objects = [];
+    for (let r = 1; r < matrix.length; r++) {
+      const line = matrix[r];
+      if (!line || !line.length) continue;
+      if (line.join('').trim() === '') continue;
+      const obj = {};
+      for (let c = 0; c < headers.length; c++) obj[headers[c]] = (line[c] ?? '').trim();
+      objects.push(obj);
+    }
+    return objects;
   }
-  return null;
-}
+  function n(v) {
+    const s = String(v ?? '').replace(/[^0-9.\-]/g,'').trim();
+    if (!s) return 0;
+    const x = Number(s);
+    return Number.isFinite(x) ? x : 0;
+  }
 
-function n(v) {
-  if (v == null) return 0;
-  const s = String(v).replace(/[^0-9.\-]/g,'').trim();
-  if (!s) return 0;
-  const x = Number(s);
-  return Number.isFinite(x) ? x : 0;
-}
+  async function loadCSV(){
+    setStatus(false, 'Loading…');
+    setMeta('');
+    try{
+      const url = CSV_URL + '?v=' + Date.now(); // cache-bust
+      const res = await fetch(url, { cache: 'no-store' });
+      if(!res.ok) throw new Error(`HTTP ${res.status}`);
 
-function downloadCSV(filename, rows) {
-  const esc = (v) => {
-    const s = v == null ? '' : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
-  };
-  const csv = rows.map(r => r.map(esc).join(',')).join('\n');
-  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
+      const lastModified = res.headers.get('last-modified');
+      const etag = res.headers.get('etag');
 
-/* -----------------------------
-   App state
-------------------------------*/
-let RAW_ROWS = [];
-let HEADERS = [];
-let LAST_PICK = [];
+      const text = await res.text();
+      const delim = detectDelimiter(text);
+      rows = toObjects(parseCSV(text, delim));
+      lastPick = [];
+      resultsEl.innerHTML = '';
+      summaryEl.textContent = '';
 
-const statusEl = document.getElementById('status');
-const diagEl = document.getElementById('diag');
-const resultsEl = document.getElementById('results');
-const summaryEl = document.getElementById('summary');
+      setStatus(true, `Parsed ${rows.length} rows`);
+      setMeta(`
+        <div><strong>CSV file:</strong> <code>${CSV_URL}</code></div>
+        <div><strong>CSV Last Updated (server):</strong> ${lastModified ? fmtDate(lastModified) : 'Unknown'}</div>
+        <div><strong>Loaded at (this device):</strong> ${new Date().toLocaleString()}</div>
+        ${etag ? `<div><strong>ETag:</strong> <code>${etag}</code></div>` : ''}
+      `);
+    }catch(e){
+      rows = [];
+      setStatus(false, `Couldn’t load <code>${CSV_URL}</code> — ${e.message}`);
+      setMeta(`<div style="color:#7f1d1d"><strong>Tip:</strong> Confirm <code>${CSV_URL}</code> exists in the repo root.</div>`);
+    }
+  }
 
-function setStatus(ok, msg) {
-  statusEl.innerHTML = `<span class="badge ${ok ? 'good' : 'bad'}">${ok ? 'Loaded' : 'Error'}</span> ${msg}`;
-}
+  function openCSV(){ window.open(CSV_URL, '_blank', 'noopener'); }
 
-function setDiag(html) { diagEl.innerHTML = html || ''; }
+  function locLabel(v){
+    if (v === 'warehouse') return 'Warehouse-66';
+    if (v === 'green') return 'Green Harbor';
+    return 'Plymouth';
+  }
 
-function locLabel(v) {
-  if (v === 'warehouse') return 'Warehouse-66';
-  if (v === 'green') return 'Green Harbor';
-  return 'Plymouth';
-}
+  function buildPick(){
+    if(!rows.length){
+      setStatus(false, 'No data loaded');
+      return;
+    }
+    const from = document.getElementById('fromLoc').value;
+    const to = document.getElementById('toLoc').value;
+    if(from === to){
+      setStatus(false, 'From and To cannot be the same');
+      return;
+    }
 
-/* -----------------------------
-   Column mapping for YOUR headers
-------------------------------*/
-function getColumnConfig(headers) {
-  const hm = makeHeaderMap(headers);
+    const picks = [];
+    let totalUnits = 0;
 
-  // Identifiers
-  const colBarcode = firstExisting(hm, ['Variant Barcode']);
-  const colSku     = firstExisting(hm, ['Variant SKU']);
-  const colTitle   = firstExisting(hm, ['Title']);
-  const colOpt1    = firstExisting(hm, ['Option1 Value']);
-  const colOpt2    = firstExisting(hm, ['Option2 Value']);
+    for(const r of rows){
+      const sourceAvail =
+        (from === 'warehouse') ? n(r[COL_WH_AV]) :
+        (from === 'green') ? n(r[COL_GH_ON]) :
+        n(r[COL_PLY_ON]);
 
-  // Bin
-  const colWhBin   = firstExisting(hm, ['Variant Metafield: custom.wh_bin [single_line_text_field]']);
+      if(sourceAvail <= 0) continue;
 
-  // Inventory by location
-  const colPlyOn   = firstExisting(hm, ['Inventory Available: Plymouth']);
-  const colGhOn    = firstExisting(hm, ['Inventory Available: Green Harbor']);
-  const colWhAvail = firstExisting(hm, ['Inventory Available: Warehouse-66']);
+      const destOn  = (to === 'plymouth') ? n(r[COL_PLY_ON]) : n(r[COL_GH_ON]);
+      const destMin = (to === 'plymouth') ? n(r[COL_PLY_MIN]) : n(r[COL_GH_MIN]);
+      const destMax = (to === 'plymouth') ? n(r[COL_PLY_MAX]) : n(r[COL_GH_MAX]);
 
-  // Min/max metafields
-  const colPlyMin  = firstExisting(hm, ['Variant Metafield: custom.minply [number_integer]']);
-  const colPlyMax  = firstExisting(hm, ['Variant Metafield: custom.maxply [number_integer]']);
-  const colGhMin   = firstExisting(hm, ['Variant Metafield: custom.mingh [number_integer]']);
-  const colGhMax   = firstExisting(hm, ['Variant Metafield: custom.maxgh [number_integer]']);
+      if(!(destOn < destMin)) continue;
 
-  return {
-    colBarcode, colSku, colTitle, colOpt1, colOpt2,
-    colWhBin,
-    colPlyOn, colGhOn, colWhAvail,
-    colPlyMin, colPlyMax,
-    colGhMin, colGhMax
-  };
-}
+      const needToMax = Math.max(destMax - destOn, 0);
+      const pickQty = Math.min(needToMax, sourceAvail);
+      if(pickQty <= 0) continue;
 
-/* -----------------------------
-   File load
-------------------------------*/
-document.getElementById('csvFile').addEventListener('change', async (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
+      picks.push({
+        barcode: r[COL_BARCODE] || '',
+        sku: r[COL_SKU] || '',
+        title: r[COL_TITLE] || '',
+        opt1: r[COL_OPT1] || '',
+        opt2: r[COL_OPT2] || '',
+        whbin: r[COL_WH_BIN] || '',
+        pickQty,
+        sourceAvail,
+        destOn, destMin, destMax,
+        lane: `${locLabel(from)} → ${locLabel(to)}`
+      });
+      totalUnits += pickQty;
+    }
 
-  try {
-    const text = await file.text();
-    const delim = detectDelimiter(text);
-    const matrix = parseCSV(text, delim);
-    const { headers, objects } = toObjects(matrix);
-
-    HEADERS = headers;
-    RAW_ROWS = objects;
-    LAST_PICK = [];
     resultsEl.innerHTML = '';
-    summaryEl.textContent = '';
+    for(const p of picks){
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${p.barcode}</td>
+        <td>${p.title}</td>
+        <td>${p.opt1}</td>
+        <td>${p.opt2}</td>
+        <td>${p.whbin}</td>
+        <td><strong>${p.pickQty}</strong></td>
+        <td>${p.sourceAvail}</td>
+        <td>${p.destOn}</td>
+        <td>${p.destMin}</td>
+        <td>${p.destMax}</td>
+        <td>${p.lane}</td>
+      `;
+      resultsEl.appendChild(tr);
+    }
 
-    const cfg = getColumnConfig(headers);
-
-    const missing = [];
-    if (!cfg.colBarcode) missing.push('Variant Barcode');
-    if (!cfg.colTitle) missing.push('Title');
-    if (!cfg.colPlyOn) missing.push('Inventory Available: Plymouth');
-    if (!cfg.colGhOn) missing.push('Inventory Available: Green Harbor');
-    if (!cfg.colWhAvail) missing.push('Inventory Available: Warehouse-66');
-    if (!cfg.colPlyMin) missing.push('Variant Metafield: custom.minply [number_integer]');
-    if (!cfg.colPlyMax) missing.push('Variant Metafield: custom.maxply [number_integer]');
-    if (!cfg.colGhMin) missing.push('Variant Metafield: custom.mingh [number_integer]');
-    if (!cfg.colGhMax) missing.push('Variant Metafield: custom.maxgh [number_integer]');
-
-    setStatus(true, `Loaded ${RAW_ROWS.length.toLocaleString()} rows`);
-    setDiag(
-      (missing.length
-        ? `<div style="color:#7f1d1d"><strong>Heads up:</strong> Missing: ${missing.join(', ')}</div>`
-        : `<div><strong>All required columns detected.</strong></div>`
-      ) +
-      `<div style="margin-top:6px">Mapped: <code>
-        ply_on→${cfg.colPlyOn} | gh_on→${cfg.colGhOn} | wh_avail→${cfg.colWhAvail} |
-        ply_min→${cfg.colPlyMin} | ply_max→${cfg.colPlyMax} |
-        gh_min→${cfg.colGhMin} | gh_max→${cfg.colGhMax}
-      </code></div>`
-    );
-
-  } catch (err) {
-    console.error(err);
-    setStatus(false, err.message || 'Failed to read file');
-    setDiag('');
-    RAW_ROWS = [];
-    HEADERS = [];
-    LAST_PICK = [];
-  }
-});
-
-/* -----------------------------
-   Build pick
-------------------------------*/
-function buildPick() {
-  if (!RAW_ROWS.length) {
-    setStatus(false, 'No data loaded');
-    return;
+    lastPick = picks;
+    setStatus(true, `Built ${picks.length} pick lines`);
+    summaryEl.textContent = `${locLabel(from)} → ${locLabel(to)} • Lines: ${picks.length} • Units: ${totalUnits}`;
   }
 
-  const from = document.getElementById('fromLoc').value;
-  const to = document.getElementById('toLoc').value;
+  function downloadPick(){
+    if(!lastPick.length){
+      setStatus(false, 'No pick built yet');
+      return;
+    }
+    const from = document.getElementById('fromLoc').value;
+    const to = document.getElementById('toLoc').value;
 
-  if (from === to) {
-    setStatus(false, 'From and To cannot be the same');
-    return;
+    const esc = (v) => {
+      const s = v == null ? '' : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+    };
+
+    const out = [];
+    out.push(['barcode','sku','title','option1','option2','wh_bin','pick_qty','from','to']);
+
+    for(const p of lastPick){
+      // preserve leading zeros in Excel
+      const barcode = p.barcode ? `="${p.barcode.replace(/"/g,'""')}"` : '';
+      out.push([barcode, p.sku, p.title, p.opt1, p.opt2, p.whbin, p.pickQty, locLabel(from), locLabel(to)]);
+    }
+
+    const csv = out.map(r => r.map(esc).join(',')).join('\n');
+    const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `transfer_pick_${from}_to_${to}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    setStatus(true, 'Downloaded pick CSV');
   }
 
-  const cfg = getColumnConfig(HEADERS);
+  document.getElementById('buildBtn').addEventListener('click', buildPick);
+  document.getElementById('downloadBtn').addEventListener('click', downloadPick);
 
-  // Validate required based on lane
-  const missing = [];
-
-  // Source availability
-  if (from === 'warehouse' && !cfg.colWhAvail) missing.push('Inventory Available: Warehouse-66');
-  if (from === 'plymouth' && !cfg.colPlyOn) missing.push('Inventory Available: Plymouth');
-  if (from === 'green' && !cfg.colGhOn) missing.push('Inventory Available: Green Harbor');
-
-  // Destination on/min/max
-  if (to === 'plymouth') {
-    if (!cfg.colPlyOn) missing.push('Inventory Available: Plymouth');
-    if (!cfg.colPlyMin) missing.push('Variant Metafield: custom.minply [number_integer]');
-    if (!cfg.colPlyMax) missing.push('Variant Metafield: custom.maxply [number_integer]');
-  } else if (to === 'green') {
-    if (!cfg.colGhOn) missing.push('Inventory Available: Green Harbor');
-    if (!cfg.colGhMin) missing.push('Variant Metafield: custom.mingh [number_integer]');
-    if (!cfg.colGhMax) missing.push('Variant Metafield: custom.maxgh [number_integer]');
-  }
-
-  if (missing.length) {
-    setStatus(false, `Missing required columns: ${missing.join(', ')}`);
-    return;
-  }
-
-  const picks = [];
-  let totalUnits = 0;
-
-  for (const r of RAW_ROWS) {
-    const sourceAvail =
-      (from === 'warehouse') ? n(r[cfg.colWhAvail]) :
-      (from === 'plymouth')  ? n(r[cfg.colPlyOn]) :
-                               n(r[cfg.colGhOn]);
-
-    if (sourceAvail <= 0) continue;
-
-    const destOn  = (to === 'plymouth') ? n(r[cfg.colPlyOn])  : n(r[cfg.colGhOn]);
-    const destMin = (to === 'plymouth') ? n(r[cfg.colPlyMin]) : n(r[cfg.colGhMin]);
-    const destMax = (to === 'plymouth') ? n(r[cfg.colPlyMax]) : n(r[cfg.colGhMax]);
-
-    // Trigger: dest strictly below min
-    if (!(destOn < destMin)) continue;
-
-    const needToMax = Math.max(destMax - destOn, 0);
-    const pickQty = Math.min(needToMax, sourceAvail);
-    if (pickQty <= 0) continue;
-
-    picks.push({
-      barcode: cfg.colBarcode ? (r[cfg.colBarcode] || '') : '',
-      sku: cfg.colSku ? (r[cfg.colSku] || '') : '',
-      title: cfg.colTitle ? (r[cfg.colTitle] || '') : '',
-      opt1: cfg.colOpt1 ? (r[cfg.colOpt1] || '') : '',
-      opt2: cfg.colOpt2 ? (r[cfg.colOpt2] || '') : '',
-      whbin: cfg.colWhBin ? (r[cfg.colWhBin] || '') : '',
-      pickQty,
-      sourceAvail,
-      destOn, destMin, destMax,
-      lane: `${locLabel(from)} → ${locLabel(to)}`
-    });
-
-    totalUnits += pickQty;
-  }
-
-  // Render
-  resultsEl.innerHTML = '';
-  for (const p of picks) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td>${p.barcode}</td>
-      <td>${p.title}</td>
-      <td>${p.opt1}</td>
-      <td>${p.opt2}</td>
-      <td>${p.whbin}</td>
-      <td><strong>${p.pickQty}</strong></td>
-      <td>${p.sourceAvail}</td>
-      <td>${p.destOn}</td>
-      <td>${p.destMin}</td>
-      <td>${p.destMax}</td>
-      <td>${p.lane}</td>
-    `;
-    resultsEl.appendChild(tr);
-  }
-
-  LAST_PICK = picks;
-  setStatus(true, `Built ${picks.length} pick lines`);
-  summaryEl.textContent = `${locLabel(from)} → ${locLabel(to)} • Lines: ${picks.length} • Units: ${totalUnits}`;
-}
-
-document.getElementById('buildBtn').addEventListener('click', buildPick);
-
-document.getElementById('downloadBtn').addEventListener('click', () => {
-  if (!LAST_PICK.length) {
-    setStatus(false, 'No pick built yet');
-    return;
-  }
-
-  const from = document.getElementById('fromLoc').value;
-  const to = document.getElementById('toLoc').value;
-
-  // Output columns (tight + useful). You can change order any time.
-  const out = [
-    ['barcode','sku','title','option1','option2','wh_bin','pick_qty','from','to']
-  ];
-
-  for (const p of LAST_PICK) {
-    // Preserve leading zeros in Excel
-    const barcode = p.barcode ? `="${p.barcode.replace(/"/g,'""')}"` : '';
-    out.push([barcode, p.sku, p.title, p.opt1, p.opt2, p.whbin, p.pickQty, locLabel(from), locLabel(to)]);
-  }
-
-  downloadCSV(`transfer_pick_${from}_to_${to}.csv`, out);
-  setStatus(true, 'Downloaded pick CSV');
-});
+  // boot
+  loadCSV();
 </script>
 
 </body>
