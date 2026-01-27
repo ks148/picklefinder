@@ -29,12 +29,9 @@
     border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,.06);
     max-width:1100px;
   }
-  .topnav a{
-    text-decoration:none; font-weight:900; color:#0f172a;
-    padding:8px 10px; border-radius:10px;
-  }
-  .topnav a:hover{ background:#f1f5f9; }
-  .topnav .active{ background:#e2e8f0; }
+  .topnav a{text-decoration:none;font-weight:900;color:#0f172a;padding:8px 10px;border-radius:10px}
+  .topnav a:hover{background:#f1f5f9}
+  .topnav .active{background:#e2e8f0}
 
   .grid{display:grid;grid-template-columns: 1fr 1fr;gap:12px}
   @media (max-width:800px){ .grid{grid-template-columns:1fr;} }
@@ -56,10 +53,15 @@
   .field label{font-size:12px;font-weight:900;color:#475569}
   .field input{font-size:16px;padding:8px 10px;border-radius:10px;border:1px solid #cbd5e1;width:140px}
   .field input.wide{width:200px}
+
+  .toast{position:fixed;left:20px;bottom:20px;background:#0f172a;color:#fff;
+    padding:10px 12px;border-radius:12px;font-weight:800;box-shadow:0 8px 20px rgba(0,0,0,.18);display:none;z-index:9999}
 </style>
 </head>
 
 <body>
+
+<div id="toast" class="toast"></div>
 
 <nav class="topnav">
   <a href="./picklefinder.html">🥒 PickleFinder</a>
@@ -70,9 +72,8 @@
 
 <h1>Scan Check + Putaway</h1>
 <p class="sub">
-  Auto-loads <strong>pickle-data.csv</strong>. Scan an item to see <strong>Needed to Max</strong> for Plymouth & Green Harbor.
-  Each successful scan is automatically added to the Putaway list.
-  You can also queue <strong>Min/Max/Weight</strong> changes and export an <strong>Updates CSV</strong>.
+  Scan an item to see <strong>Needed to Max</strong> for Plymouth & Green Harbor. Each successful scan is auto-added to Putaway.
+  Use <strong>Queue Update</strong> to build an Updates CSV for min/max/weight.
 </p>
 
 <div class="card">
@@ -84,10 +85,12 @@
     <button type="button" onclick="openCSV()">Open CSV</button>
     <button type="button" onclick="clearPutaway()">Clear Putaway List</button>
     <button type="button" class="primary" onclick="downloadPutaway()">Download Putaway CSV</button>
-    <button id="updatesBtn" type="button" class="primary" onclick="downloadUpdates()" disabled>
-      Download Updates CSV (Min/Max/Weight)
+    <button id="updatesBtn" type="button" class="primary" onclick="downloadUpdates()">
+      Download Updates CSV
     </button>
   </div>
+
+  <div class="sub" id="summary" style="margin-top:10px"></div>
 </div>
 
 <div class="card">
@@ -97,10 +100,22 @@
 
 <div class="card">
   <div style="font-weight:1000;margin-bottom:6px">Putaway List</div>
-  <div class="sub" id="putawaySummary"></div>
   <table>
     <thead><tr><th>Time</th><th>Bin</th><th>Barcode</th><th>Title</th></tr></thead>
     <tbody id="putawayTable"></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <div style="font-weight:1000;margin-bottom:6px">Queued Updates Preview</div>
+  <div class="sub">If Queue Update worked, rows will appear here immediately.</div>
+  <table>
+    <thead>
+      <tr>
+        <th>Barcode</th><th>SKU</th><th>Min PLY</th><th>Max PLY</th><th>Min GH</th><th>Max GH</th><th>Weight</th>
+      </tr>
+    </thead>
+    <tbody id="updatesTable"></tbody>
   </table>
 </div>
 
@@ -118,14 +133,14 @@
   const COL_PLY_MAX = 'Variant Metafield: custom.maxply [number_integer]';
   const COL_GH_MAX  = 'Variant Metafield: custom.maxgh [number_integer]';
 
-  // For Updates export (min/max + weight)
+  // Updates export headers
   const COL_PLY_MIN = 'Variant Metafield: custom.minply [number_integer]';
   const COL_GH_MIN  = 'Variant Metafield: custom.mingh [number_integer]';
-  // ⚠️ If your weight column header is different, change this to match your CSV exactly:
+  // ⚠️ If your weight header differs, change this:
   const COL_WEIGHT  = 'Variant Metafield: custom.weight [number_decimal]';
 
   let rows = [];
-  let putaway = []; // {time, bin, barcode, title}
+  let putaway = [];
   let updates = new Map(); // key -> {barcode, sku, minply, maxply, mingh, maxgh, weight}
 
   const statusEl = document.getElementById('status');
@@ -133,8 +148,16 @@
   const resultEl = document.getElementById('result');
   const scanEl   = document.getElementById('scan');
   const putawayTableEl = document.getElementById('putawayTable');
-  const putawaySummaryEl = document.getElementById('putawaySummary');
-  const updatesBtn = document.getElementById('updatesBtn');
+  const updatesTableEl = document.getElementById('updatesTable');
+  const summaryEl = document.getElementById('summary');
+
+  function toast(msg){
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.style.display = 'block';
+    clearTimeout(toast._timer);
+    toast._timer = setTimeout(()=>t.style.display='none', 1800);
+  }
 
   function esc(s){
     return String(s ?? '')
@@ -154,7 +177,7 @@
     return Number.isFinite(x) ? x : 0;
   }
 
-  // Robust CSV parsing (handles quoted commas)
+  // CSV parsing (quoted commas)
   function detectDelimiter(text) {
     const firstLine = (text.split(/\r?\n/).find(l => l.trim() !== '') || '');
     const candidates = [',',';','\t','|'];
@@ -228,18 +251,19 @@
         <div><strong>Loaded at (this device):</strong> ${new Date().toLocaleString()}</div>
         ${etag ? `<div><strong>ETag:</strong> <code>${esc(etag)}</code></div>` : ''}
       `);
+      toast('CSV loaded');
     }catch(e){
       setStatus(false, `Couldn’t load <code>${esc(CSV_URL)}</code> — ${esc(e.message)}`);
       setMeta(`<div style="color:#7f1d1d;"><strong>Tip:</strong> Confirm <code>${esc(CSV_URL)}</code> exists in the repo root.</div>`);
     }
+    updateSummary();
   }
 
   function openCSV(){ window.open(CSV_URL, '_blank', 'noopener'); }
 
   function updateSummary(){
-    putawaySummaryEl.innerHTML =
-      `<strong>Total putaway scans:</strong> ${putaway.length} &nbsp; | &nbsp; <strong>Updates queued:</strong> ${updates.size}`;
-    updatesBtn.disabled = (updates.size === 0);
+    summaryEl.innerHTML =
+      `<strong>Putaway scans:</strong> ${putaway.length} &nbsp; | &nbsp; <strong>Updates queued:</strong> ${updates.size}`;
   }
 
   scanEl.addEventListener('keydown', (e)=>{
@@ -287,10 +311,9 @@
     const curMaxGh  = n(m[COL_GH_MAX]);
     const curWeight = (m[COL_WEIGHT] ?? '').toString().trim();
 
-    // Auto add to putaway on every successful scan
+    // Auto add to putaway on success
     addPutaway(bin, barcode, title);
 
-    // render output + edit panel
     resultEl.innerHTML = `
       <div class="grid">
         <div class="kpi">
@@ -310,8 +333,8 @@
       <div class="smallline"><strong>Barcode:</strong> ${esc(barcode)} &nbsp; | &nbsp; <strong>SKU:</strong> ${esc(sku)}</div>
 
       <div class="card" style="margin-top:12px;max-width:none;background:#f8fafc;border:1px solid #e2e8f0">
-        <div style="font-weight:1000;margin-bottom:6px">Update Min/Max/Weight (queues an Updates CSV row)</div>
-        <div class="sub" style="margin:0 0 10px 0">Edit values, click <strong>Queue Update</strong>, then download Updates CSV.</div>
+        <div style="font-weight:1000;margin-bottom:6px">Update Min/Max/Weight</div>
+        <div class="sub" style="margin:0 0 10px 0">Edit values, click <strong>Queue Update</strong>. You’ll see it appear in “Queued Updates Preview”.</div>
 
         <div class="formRow">
           <div class="field"><label>Min PLY</label><input id="u_minply" value="${curMinPly}" inputmode="numeric"></div>
@@ -324,15 +347,6 @@
         <div style="margin-top:10px;display:flex;gap:10px;flex-wrap:wrap;">
           <button type="button" class="primary" onclick="queueUpdate(${JSON.stringify(barcode)},${JSON.stringify(sku)})">Queue Update</button>
           <button type="button" onclick="removeUpdate(${JSON.stringify(barcode)},${JSON.stringify(sku)})">Remove Update</button>
-        </div>
-
-        <div class="sub" style="margin-top:10px">
-          Columns used in Updates CSV:
-          <code>${esc(COL_PLY_MIN)}</code>,
-          <code>${esc(COL_PLY_MAX)}</code>,
-          <code>${esc(COL_GH_MIN)}</code>,
-          <code>${esc(COL_GH_MAX)}</code>,
-          <code>${esc(COL_WEIGHT)}</code>
         </div>
       </div>
     `;
@@ -361,68 +375,80 @@
     scanEl.focus();
   }
 
-  function downloadPutaway(){
-    if(!putaway.length){
-      setStatus(false, 'No putaway scans to export');
-      return;
-    }
-
-    const sorted = [...putaway].sort((a,b) =>
-      String(a.bin).localeCompare(String(b.bin), undefined, {numeric:true, sensitivity:'base'})
-    );
-
-    const rowsOut = [['bin','barcode','title']];
-    for(const s of sorted){
-      const bc = s.barcode ? `="${String(s.barcode).replace(/"/g,'""')}"` : '';
-      rowsOut.push([s.bin || '', bc, s.title || '']);
-    }
-
-    const csv = rowsOut.map(r => r.map(csvCell).join(',')).join('\n');
-    downloadText(csv, `putaway_report_${new Date().toISOString().slice(0,10)}.csv`);
-    setStatus(true, 'Downloaded Putaway Report CSV');
-  }
-
   function queueUpdate(barcode, sku){
-    const key = `${barcode}|${sku}`;
     const minply = document.getElementById('u_minply')?.value ?? '';
     const maxply = document.getElementById('u_maxply')?.value ?? '';
     const mingh  = document.getElementById('u_mingh')?.value ?? '';
     const maxgh  = document.getElementById('u_maxgh')?.value ?? '';
     const weight = document.getElementById('u_weight')?.value ?? '';
 
+    const key = `${barcode}|${sku}`;
     updates.set(key, { barcode, sku, minply, maxply, mingh, maxgh, weight });
+
+    renderUpdatesPreview();
     updateSummary();
-    setStatus(true, `Queued update (${updates.size} total)`);
+    toast('Update queued');
   }
 
   function removeUpdate(barcode, sku){
     updates.delete(`${barcode}|${sku}`);
+    renderUpdatesPreview();
     updateSummary();
-    setStatus(true, `Removed update (${updates.size} total)`);
+    toast('Update removed');
+  }
+
+  function renderUpdatesPreview(){
+    updatesTableEl.innerHTML = '';
+    for(const u of updates.values()){
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${esc(u.barcode)}</td>
+        <td>${esc(u.sku)}</td>
+        <td>${esc(u.minply)}</td>
+        <td>${esc(u.maxply)}</td>
+        <td>${esc(u.mingh)}</td>
+        <td>${esc(u.maxgh)}</td>
+        <td>${esc(u.weight)}</td>
+      `;
+      updatesTableEl.appendChild(tr);
+    }
+  }
+
+  function downloadPutaway(){
+    if(!putaway.length){
+      setStatus(false, 'No putaway scans to export');
+      return;
+    }
+    const sorted = [...putaway].sort((a,b) =>
+      String(a.bin).localeCompare(String(b.bin), undefined, {numeric:true, sensitivity:'base'})
+    );
+    const rowsOut = [['bin','barcode','title']];
+    for(const s of sorted){
+      const bc = s.barcode ? `="${String(s.barcode).replace(/"/g,'""')}"` : '';
+      rowsOut.push([s.bin || '', bc, s.title || '']);
+    }
+    const csv = rowsOut.map(r => r.map(csvCell).join(',')).join('\n');
+    downloadText(csv, `putaway_report_${new Date().toISOString().slice(0,10)}.csv`);
+    setStatus(true, 'Downloaded Putaway Report CSV');
   }
 
   function downloadUpdates(){
-    try{
-      if(updates.size === 0){
-        setStatus(false, 'No updates queued (scan an item, edit values, click “Queue Update”)');
-        return;
-      }
-
-      const header = ['Variant Barcode','Variant SKU', COL_PLY_MIN, COL_PLY_MAX, COL_GH_MIN, COL_GH_MAX, COL_WEIGHT];
-      const out = [header];
-
-      for(const u of updates.values()){
-        const bc = u.barcode ? `="${String(u.barcode).replace(/"/g,'""')}"` : '';
-        out.push([bc, u.sku || '', u.minply ?? '', u.maxply ?? '', u.mingh ?? '', u.maxgh ?? '', u.weight ?? '']);
-      }
-
-      const csv = out.map(r => r.map(csvCell).join(',')).join('\n');
-      downloadText(csv, `pickle_updates_${new Date().toISOString().slice(0,10)}.csv`);
-      setStatus(true, 'Downloaded Updates CSV');
-    }catch(err){
-      console.error(err);
-      setStatus(false, `Updates download failed: ${err?.message || err}`);
+    if(updates.size === 0){
+      setStatus(false, 'No updates queued. Scan an item → edit values → Queue Update.');
+      return;
     }
+
+    const header = ['Variant Barcode','Variant SKU', COL_PLY_MIN, COL_PLY_MAX, COL_GH_MIN, COL_GH_MAX, COL_WEIGHT];
+    const out = [header];
+
+    for(const u of updates.values()){
+      const bc = u.barcode ? `="${String(u.barcode).replace(/"/g,'""')}"` : '';
+      out.push([bc, u.sku || '', u.minply ?? '', u.maxply ?? '', u.mingh ?? '', u.maxgh ?? '', u.weight ?? '']);
+    }
+
+    const csv = out.map(r => r.map(csvCell).join(',')).join('\n');
+    downloadText(csv, `pickle_updates_${new Date().toISOString().slice(0,10)}.csv`);
+    setStatus(true, 'Downloaded Updates CSV');
   }
 
   function csvCell(v){
@@ -430,27 +456,35 @@
     return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
   }
 
-  // iOS/Safari-friendly download
+  // Stronger iOS/Safari download fallback:
+  // 1) click <a download>
+  // 2) if Safari blocks, open blob URL in new tab so user can "Share → Save to Files"
   function downloadText(text, filename){
     const blob = new Blob([text], {type:'text/csv;charset=utf-8;'});
-    // Some iOS browsers need window.open fallback
     const url = URL.createObjectURL(blob);
 
     const a = document.createElement('a');
     a.href = url;
     a.download = filename;
     a.rel = 'noopener';
-
     document.body.appendChild(a);
-    a.click();
-    a.remove();
 
-    setTimeout(()=>URL.revokeObjectURL(url), 1000);
+    try{
+      a.click();
+      toast('Download started');
+    }catch(e){
+      // fallback
+      window.open(url, '_blank', 'noopener');
+      toast('Opened file (Save/Share)');
+    }finally{
+      a.remove();
+      setTimeout(()=>URL.revokeObjectURL(url), 2000);
+    }
   }
 
   // boot
-  updateSummary();
   loadCSV();
+  updateSummary();
 </script>
 
 </body>
