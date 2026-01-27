@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Putaway – Scan Log</title>
+
+<style>
+  body{font-family:system-ui,-apple-system,Segoe UI,Roboto;background:#f7f9fc;margin:0;padding:20px}
+  .card{background:#fff;border-radius:12px;padding:16px;margin:0 0 14px 0;max-width:1100px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+  h1{margin:0 0 6px}
+  .sub{font-size:13px;color:#555;margin:0 0 14px;line-height:1.35}
+  input{font-size:22px;padding:10px;width:100%;border-radius:10px;border:1px solid #ccc;box-sizing:border-box}
+  .bin{font-size:56px;font-weight:900;margin:12px 0;letter-spacing:1px}
+  .badge{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:800;vertical-align:middle}
+  .good{background:#dcfce7;color:#166534}
+  .bad{background:#fee2e2;color:#7f1d1d}
+  table{width:100%;border-collapse:collapse;margin-top:10px;font-size:14px}
+  th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left}
+  tbody tr:nth-child(even){background:#f9fafb}
+  button{padding:8px 12px;border-radius:10px;border:1px solid #cbd5e1;font-weight:800;cursor:pointer;background:#fff}
+  button.primary{background:#2563eb;border-color:#2563eb;color:#fff}
+  button:active{transform:translateY(1px)}
+  .meta{margin-top:8px;font-size:13px;color:#444;line-height:1.35}
+  .meta strong{color:#111}
+  code{background:#f3f4f6;padding:1px 6px;border-radius:6px}
+
+  .topnav{
+    display:flex; gap:10px; align-items:center;
+    padding:10px 12px; margin:0 0 14px 0;
+    background:#fff; border:1px solid #e2e8f0;
+    border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,.06);
+    max-width:1100px;
+  }
+  .topnav a{
+    text-decoration:none; font-weight:900; color:#0f172a;
+    padding:8px 10px; border-radius:10px;
+  }
+  .topnav a:hover{ background:#f1f5f9; }
+  .topnav .active{ background:#e2e8f0; }
+</style>
+</head>
+
+<body>
+
+<nav class="topnav">
+  <a href="./picklefinder.html">🥒 PickleFinder</a>
+  <a href="./pickle24.html">📦 Pickle24</a>
+  <a class="active" href="./putaway.html">🧾 Putaway</a>
+  <a href="./index.html">🏠 Home</a>
+</nav>
+
+<h1>Putaway – Scan Log</h1>
+<p class="sub">
+  Auto-loads <strong>pickle-data.csv</strong> from this site. Scan items to build a Putaway Report (sorted by bin).
+</p>
+
+<div class="card">
+  <div id="status"><span class="badge bad">Not loaded</span> Waiting…</div>
+  <div id="meta" class="meta"></div>
+  <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap;">
+    <button type="button" onclick="loadCSV()">Reload from site</button>
+    <button type="button" onclick="openCSV()">Open CSV</button>
+    <button type="button" onclick="clearScans()">Clear Scans</button>
+    <button type="button" class="primary" onclick="downloadPutaway()">Download Putaway CSV</button>
+  </div>
+</div>
+
+<div class="card">
+  <input id="scan" placeholder="Scan barcode or SKU and press Enter" autofocus>
+  <div id="result"></div>
+</div>
+
+<div class="card">
+  <div style="font-weight:900;margin-bottom:6px">Scanned Items</div>
+  <div class="sub" id="scanSummary"></div>
+  <table>
+    <thead><tr><th>Time</th><th>Bin</th><th>Barcode</th><th>Title</th></tr></thead>
+    <tbody id="log"></tbody>
+  </table>
+</div>
+
+<script>
+  // Shared repo data file
+  const CSV_URL = './pickle-data.csv';
+
+  // Your column headers
+  const COL_BARCODE = 'Variant Barcode';
+  const COL_SKU     = 'Variant SKU';
+  const COL_TITLE   = 'Title';
+  const COL_BIN     = 'Variant Metafield: custom.wh_bin [single_line_text_field]';
+
+  let rows = [];
+  let scans = []; // {time, bin, barcode, title}
+
+  const statusEl = document.getElementById('status');
+  const metaEl   = document.getElementById('meta');
+  const resultEl = document.getElementById('result');
+  const logEl    = document.getElementById('log');
+  const scanSummaryEl = document.getElementById('scanSummary');
+
+  function esc(s){
+    return String(s ?? '')
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+      .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+  function setStatus(ok, msg){
+    statusEl.innerHTML = `<span class="badge ${ok ? 'good' : 'bad'}">${ok ? 'Loaded' : 'Failed'}</span> ${msg}`;
+  }
+  function setMeta(html){ metaEl.innerHTML = html || ''; }
+  function fmtDate(d){ try{ return new Date(d).toLocaleString(); } catch { return String(d||''); } }
+
+  // Robust CSV parse (handles quoted commas)
+  function detectDelimiter(text) {
+    const firstLine = (text.split(/\r?\n/).find(l => l.trim() !== '') || '');
+    const candidates = [',',';','\t','|'];
+    let best = ',', bestCount = -1;
+    for (const d of candidates) {
+      const c = firstLine.split(d).length;
+      if (c > bestCount) { bestCount = c; best = d; }
+    }
+    return best;
+  }
+  function parseCSV(text, delimiter) {
+    const out = [];
+    let i = 0, field = '', row = [], inQuotes = false;
+
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+
+    while (i < text.length) {
+      const c = text[i];
+      if (c === '"') {
+        if (inQuotes && text[i+1] === '"') { field += '"'; i++; }
+        else { inQuotes = !inQuotes; }
+      } else if (c === delimiter && !inQuotes) {
+        row.push(field); field = '';
+      } else if ((c === '\n' || c === '\r') && !inQuotes) {
+        if (field !== '' || row.length) { row.push(field); out.push(row); row = []; field = ''; }
+        if (c === '\r' && text[i+1] === '\n') i++;
+      } else {
+        field += c;
+      }
+      i++;
+    }
+    if (field !== '' || row.length) { row.push(field); out.push(row); }
+    return out;
+  }
+  function toObjects(matrix) {
+    if (!matrix.length) return [];
+    const headers = (matrix[0] || []).map(h => String(h ?? '').trim());
+    const objects = [];
+    for (let r = 1; r < matrix.length; r++) {
+      const line = matrix[r];
+      if (!line || !line.length) continue;
+      if (line.join('').trim() === '') continue;
+      const obj = {};
+      for (let c = 0; c < headers.length; c++) obj[headers[c]] = (line[c] ?? '').trim();
+      objects.push(obj);
+    }
+    return objects;
+  }
+
+  async function loadCSV(){
+    setStatus(false, 'Loading…');
+    setMeta('');
+    rows = [];
+
+    try{
+      const url = CSV_URL + '?v=' + Date.now(); // cache-bust
+      const res = await fetch(url, { cache: 'no-store' });
+      if(!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const lastModified = res.headers.get('last-modified');
+      const etag = res.headers.get('etag');
+
+      const text = await res.text();
+      const delim = detectDelimiter(text);
+      rows = toObjects(parseCSV(text, delim));
+
+      setStatus(true, `Parsed ${rows.length} rows`);
+      setMeta(`
+        <div><strong>CSV file:</strong> <code>${esc(CSV_URL)}</code></div>
+        <div><strong>CSV Last Updated (server):</strong> ${lastModified ? fmtDate(lastModified) : '<span style="color:#7f1d1d;">Unknown</span>'}</div>
+        <div><strong>Loaded at (this device):</strong> ${new Date().toLocaleString()}</div>
+        ${etag ? `<div><strong>ETag:</strong> <code>${esc(etag)}</code></div>` : ''}
+      `);
+    }catch(e){
+      setStatus(false, `Couldn’t load <code>${esc(CSV_URL)}</code> — ${esc(e.message)}`);
+      setMeta(`<div style="color:#7f1d1d;"><strong>Tip:</strong> Confirm <code>${esc(CSV_URL)}</code> exists in the repo root.</div>`);
+    }
+  }
+
+  function openCSV(){ window.open(CSV_URL, '_blank', 'noopener'); }
+
+  function updateScanSummary(){
+    scanSummaryEl.innerHTML = `<strong>Total scans:</strong> ${scans.length}`;
+  }
+
+  document.getElementById('scan').addEventListener('keydown', (e)=>{
+    if(e.key === 'Enter'){
+      const q = e.target.value.trim();
+      e.target.value = '';
+      lookup(q);
+      setTimeout(()=>document.getElementById('scan').focus(), 50);
+    }
+  });
+
+  function lookup(q){
+    if(!rows.length){
+      resultEl.innerHTML = `<div class="badge bad">Not ready</div> Load the CSV first.`;
+      return;
+    }
+
+    const m = rows.find(r =>
+      (r[COL_BARCODE] && r[COL_BARCODE] === q) ||
+      (r[COL_SKU] && r[COL_SKU] === q)
+    );
+
+    if(!m){
+      resultEl.innerHTML = `<div class="badge bad">Not found</div>`;
+      return;
+    }
+
+    const bin = (m[COL_BIN] || '—').trim();
+    const title = (m[COL_TITLE] || '').trim();
+    const barcode = (m[COL_BARCODE] || '').trim();
+    const sku = (m[COL_SKU] || '').trim();
+
+    resultEl.innerHTML = `
+      <div class="bin">${esc(bin)}</div>
+      <div><strong>${esc(title)}</strong></div>
+      <div style="margin-top:6px;color:#444;font-size:14px;">
+        <strong>Barcode:</strong> ${esc(barcode)} &nbsp; | &nbsp;
+        <strong>SKU:</strong> ${esc(sku)}
+      </div>
+    `;
+
+    addScan({bin, barcode, title});
+  }
+
+  function addScan({bin, barcode, title}){
+    const time = new Date();
+    scans.push({time, bin, barcode, title});
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${esc(time.toLocaleTimeString())}</td>
+      <td>${esc(bin)}</td>
+      <td>${esc(barcode)}</td>
+      <td>${esc(title)}</td>
+    `;
+    logEl.prepend(tr);
+    updateScanSummary();
+  }
+
+  function clearScans(){
+    scans = [];
+    logEl.innerHTML = '';
+    resultEl.innerHTML = '';
+    updateScanSummary();
+    document.getElementById('scan').focus();
+  }
+
+  function downloadPutaway(){
+    if(!scans.length){
+      setStatus(false, 'No scans to export');
+      return;
+    }
+
+    // Sort by bin (text, but numeric-aware)
+    const sorted = [...scans].sort((a,b) => String(a.bin).localeCompare(String(b.bin), undefined, {numeric:true, sensitivity:'base'}));
+
+    // CSV: bin, barcode, title (one row per scan)
+    const rowsOut = [['bin','barcode','title']];
+    for(const s of sorted){
+      // Preserve leading zeros in Excel for barcode
+      const barcode = s.barcode ? `="${String(s.barcode).replace(/"/g,'""')}"` : '';
+      rowsOut.push([s.bin || '', barcode, s.title || '']);
+    }
+
+    const escCell = (v) => {
+      const s = v == null ? '' : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+    };
+
+    const csv = rowsOut.map(r => r.map(escCell).join(',')).join('\n');
+    const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `putaway_report_${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+
+    setStatus(true, 'Downloaded Putaway Report CSV');
+  }
+
+  // boot
+  updateScanSummary();
+  loadCSV();
+</script>
+
+</body>
+</html>
