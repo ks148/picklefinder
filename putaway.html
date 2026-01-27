@@ -26,11 +26,10 @@
     padding:10px 12px; margin:0 0 14px 0;
     background:#fff; border:1px solid #e2e8f0;
     border-radius:12px; box-shadow:0 2px 8px rgba(0,0,0,.06);
-    max-width:1100px;
+    max-width:1100px; flex-wrap:wrap;
   }
   .topnav a{text-decoration:none;font-weight:900;color:#0f172a;padding:8px 10px;border-radius:10px}
   .topnav a:hover{background:#f1f5f9}
-  .topnav .active{background:#e2e8f0}
 
   .grid{display:grid;grid-template-columns: 1fr 1fr;gap:12px}
   @media (max-width:800px){ .grid{grid-template-columns:1fr;} }
@@ -52,6 +51,7 @@
   .field label{font-size:12px;font-weight:900;color:#475569}
   .field input{font-size:16px;padding:8px 10px;border-radius:10px;border:1px solid #cbd5e1;width:140px}
   .field input.wide{width:220px}
+  .field input.bin{width:260px}
 
   .toast{position:fixed;left:20px;bottom:20px;background:#0f172a;color:#fff;
     padding:10px 12px;border-radius:12px;font-weight:900;box-shadow:0 8px 20px rgba(0,0,0,.18);display:none;z-index:9999}
@@ -62,6 +62,7 @@
 
 <div id="toast" class="toast"></div>
 
+<!-- NAV: paste the same nav into every tool page -->
 <nav class="topnav">
   <a href="./index.html">🏠 Home</a>
   <a href="./picklefinder.html">🥒 PickleFinder</a>
@@ -69,11 +70,10 @@
   <a href="./putaway.html">🧾 Scan + Putaway</a>
 </nav>
 
-
 <h1>Scan Check + Putaway</h1>
 <p class="sub">
-  Scan an item to see <strong>Needed to Max</strong> for Plymouth & Green Harbor. Every successful scan is auto-added to Putaway.
-  Edit values → <strong>Queue Update</strong> → exports contain only <strong>Variant ID</strong> + the changed fields.
+  Scan an item to see <strong>Needed to Max</strong> for Plymouth &amp; Green Harbor. Every successful scan is auto-added to Putaway.
+  Edit values → <strong>Queue Update</strong> → exports contain only <strong>Variant ID</strong> + changed fields (Min/Max, Weight, Bin).
 </p>
 
 <div class="card">
@@ -86,6 +86,7 @@
     <button id="btnClearPutaway" type="button">Clear Putaway</button>
     <button id="btnPutaway" type="button" class="primary">Download Putaway CSV</button>
 
+    <button id="btnBin" type="button" class="primary" disabled>Download Bin Updates CSV</button>
     <button id="btnWeight" type="button" class="primary" disabled>Download Weight Updates CSV</button>
     <button id="btnMinMax" type="button" class="primary" disabled>Download Min/Max Updates CSV</button>
   </div>
@@ -113,7 +114,10 @@
   <table>
     <thead>
       <tr>
-        <th>Variant ID</th><th>Min PLY</th><th>Max PLY</th><th>Min GH</th><th>Max GH</th><th>Variant Weight</th>
+        <th>Variant ID</th>
+        <th>New WH Bin</th>
+        <th>Min PLY</th><th>Max PLY</th><th>Min GH</th><th>Max GH</th>
+        <th>Variant Weight</th>
       </tr>
     </thead>
     <tbody id="updatesTable"></tbody>
@@ -130,17 +134,21 @@
   const COL_BARCODE    = 'Variant Barcode';
   const COL_SKU        = 'Variant SKU';
   const COL_TITLE      = 'Title';
+
+  // BIN column (confirmed)
   const COL_BIN        = 'Variant Metafield: custom.wh_bin [single_line_text_field]';
 
+  // On-hand + max fields for "needed to max"
   const COL_PLY_ON     = 'Inventory Available: Plymouth';
   const COL_GH_ON      = 'Inventory Available: Green Harbor';
   const COL_PLY_MAX    = 'Variant Metafield: custom.maxply [number_integer]';
   const COL_GH_MAX     = 'Variant Metafield: custom.maxgh [number_integer]';
 
+  // Min/Max metafields to update
   const COL_PLY_MIN    = 'Variant Metafield: custom.minply [number_integer]';
   const COL_GH_MIN     = 'Variant Metafield: custom.mingh [number_integer]';
 
-  // Your export header for weight:
+  // Weight column (confirmed)
   const COL_WEIGHT     = 'Variant Weight';
 
   // =========================
@@ -149,8 +157,8 @@
   let rows = [];
   let putaway = [];
 
-  // updates map keyed by Variant ID:
-  // variantId -> { variantId, minply?, maxply?, mingh?, maxgh?, weight? }
+  // updates keyed by Variant ID:
+  // variantId -> { variantId, bin?, minply?, maxply?, mingh?, maxgh?, weight? }
   let updates = new Map();
 
   let activeVariantId = '';
@@ -173,6 +181,7 @@
   const btnOpen = document.getElementById('btnOpen');
   const btnClearPutaway = document.getElementById('btnClearPutaway');
   const btnPutaway = document.getElementById('btnPutaway');
+  const btnBin = document.getElementById('btnBin');
   const btnWeight = document.getElementById('btnWeight');
   const btnMinMax = document.getElementById('btnMinMax');
 
@@ -212,20 +221,25 @@
   }
 
   function updateSummary(){
-    let weightCount = 0, minmaxCount = 0;
+    let weightCount = 0, minmaxCount = 0, binCount = 0;
     for(const u of updates.values()){
       if(u.weight != null) weightCount++;
+      if(u.bin != null) binCount++;
       if(u.minply!=null || u.maxply!=null || u.mingh!=null || u.maxgh!=null) minmaxCount++;
     }
+
     summaryEl.innerHTML =
       `<strong>Putaway scans:</strong> ${putaway.length} &nbsp; | &nbsp; <strong>Updates queued:</strong> ${updates.size}
-       &nbsp; (Weight: ${weightCount}, Min/Max: ${minmaxCount})`;
+       &nbsp; (Bin: ${binCount}, Weight: ${weightCount}, Min/Max: ${minmaxCount})`;
 
+    btnBin.disabled = (binCount === 0);
     btnWeight.disabled = (weightCount === 0);
     btnMinMax.disabled = (minmaxCount === 0);
   }
 
-  // Save CSV (iPad-friendly)
+  // iPad-friendly save:
+  // - Uses Share Sheet with a File when possible
+  // - Falls back to opening a new tab (Share → Save to Files)
   async function saveCSV(csvText, filename){
     const blob = new Blob([csvText], {type:'text/csv;charset=utf-8;'});
     const file = new File([blob], filename, {type:'text/csv'});
@@ -236,7 +250,9 @@
         toast('Share Sheet opened (Save to Files)');
         return;
       }
-    }catch(e){}
+    }catch(e){
+      // fall through
+    }
 
     const url = URL.createObjectURL(blob);
     const w = window.open(url, '_blank', 'noopener');
@@ -390,6 +406,7 @@
     const curMinGh  = m[COL_GH_MIN] ?? '';
     const curMaxGh  = m[COL_GH_MAX] ?? '';
     const curWeight = m[COL_WEIGHT] ?? '';
+    const curBin    = m[COL_BIN] ?? '';
 
     addPutaway(bin, barcode, title);
 
@@ -420,16 +437,19 @@
       </div>
 
       <div class="card" style="margin-top:12px;max-width:none;background:#f8fafc;border:1px solid #e2e8f0">
-        <div style="font-weight:1000;margin-bottom:6px">Update Min/Max/Weight</div>
+        <div style="font-weight:1000;margin-bottom:6px">Update Min/Max/Weight/Bin</div>
         <div class="sub" style="margin:0 0 10px 0">
           Leave blanks = <strong>no change</strong>. Exports contain only <strong>Variant ID</strong> + changed fields.
         </div>
 
         <div class="formRow">
+          <div class="field"><label>WH Bin (current: ${esc(curBin)})</label><input id="u_bin" class="bin" value="" placeholder="(no change)"></div>
+
           <div class="field"><label>Min PLY (current: ${esc(curMinPly)})</label><input id="u_minply" value="" inputmode="numeric" placeholder="(no change)"></div>
           <div class="field"><label>Max PLY (current: ${esc(curMaxPly)})</label><input id="u_maxply" value="" inputmode="numeric" placeholder="(no change)"></div>
           <div class="field"><label>Min GH (current: ${esc(curMinGh)})</label><input id="u_mingh" value="" inputmode="numeric" placeholder="(no change)"></div>
           <div class="field"><label>Max GH (current: ${esc(curMaxGh)})</label><input id="u_maxgh" value="" inputmode="numeric" placeholder="(no change)"></div>
+
           <div class="field"><label>Variant Weight (current: ${esc(curWeight)})</label><input id="u_weight" class="wide" value="" placeholder="(no change)"></div>
         </div>
 
@@ -485,6 +505,7 @@
     );
     const rowsOut = [['bin','barcode','title']];
     for(const s of sorted){
+      // preserve leading zeros in barcode for Excel
       const bc = s.barcode ? `="${String(s.barcode).replace(/"/g,'""')}"` : '';
       rowsOut.push([s.bin || '', bc, s.title || '']);
     }
@@ -505,6 +526,7 @@
       return;
     }
 
+    const bin    = (document.getElementById('u_bin')?.value ?? '').trim();
     const minply = (document.getElementById('u_minply')?.value ?? '').trim();
     const maxply = (document.getElementById('u_maxply')?.value ?? '').trim();
     const mingh  = (document.getElementById('u_mingh')?.value ?? '').trim();
@@ -512,6 +534,7 @@
     const weight = (document.getElementById('u_weight')?.value ?? '').trim();
 
     const obj = { variantId: activeVariantId };
+    if(bin !== '')    obj.bin = bin;
     if(minply !== '') obj.minply = minply;
     if(maxply !== '') obj.maxply = maxply;
     if(mingh  !== '') obj.mingh  = mingh;
@@ -546,6 +569,7 @@
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td>${esc(u.variantId)}</td>
+        <td>${esc(u.bin ?? '')}</td>
         <td>${esc(u.minply ?? '')}</td>
         <td>${esc(u.maxply ?? '')}</td>
         <td>${esc(u.mingh ?? '')}</td>
@@ -560,26 +584,38 @@
   // STREAMLINED EXPORTS
   // =========================
 
-  // Weight Updates: EXACTLY 2 columns => Variant ID, Variant Weight
+  // BIN Updates: EXACTLY 2 columns => Variant ID, BIN metafield column
+  function downloadBinUpdates(){
+    const items = [...updates.values()].filter(u => u.bin != null);
+    if(items.length === 0){
+      setStatus(false, 'No bin updates queued');
+      return;
+    }
+    const out = [['Variant ID', COL_BIN]];
+    for(const u of items){
+      out.push([u.variantId, u.bin ?? '']);
+    }
+    const csv = out.map(r => r.map(csvCell).join(',')).join('\n');
+    saveCSV(csv, `pickle_bin_updates_${new Date().toISOString().slice(0,10)}.csv`);
+  }
+
+  // WEIGHT Updates: EXACTLY 2 columns => Variant ID, Variant Weight
   function downloadWeightUpdates(){
     const items = [...updates.values()].filter(u => u.weight != null);
     if(items.length === 0){
       setStatus(false, 'No weight updates queued');
       return;
     }
-
     const out = [['Variant ID', COL_WEIGHT]];
     for(const u of items){
       out.push([u.variantId, u.weight ?? '']);
     }
-
     const csv = out.map(r => r.map(csvCell).join(',')).join('\n');
     saveCSV(csv, `pickle_weight_updates_${new Date().toISOString().slice(0,10)}.csv`);
   }
 
   // Min/Max Updates:
-  // Header includes ONLY the min/max columns that were actually edited anywhere in queue.
-  // Each row has Variant ID + values for those columns (blank if not changed for that variant).
+  // Header includes ONLY the min/max columns that were edited anywhere in the queue.
   function downloadMinMaxUpdates(){
     const items = [...updates.values()].filter(u =>
       u.minply!=null || u.maxply!=null || u.mingh!=null || u.maxgh!=null
@@ -589,13 +625,11 @@
       return;
     }
 
-    // Determine EXACTLY which min/max fields exist in the queue
     const useMinPly = items.some(u => u.minply!=null);
     const useMaxPly = items.some(u => u.maxply!=null);
     const useMinGh  = items.some(u => u.mingh!=null);
     const useMaxGh  = items.some(u => u.maxgh!=null);
 
-    // If you only edited ONE field (e.g., maxply), this header will be only 2 columns total.
     const header = ['Variant ID'];
     if(useMinPly) header.push(COL_PLY_MIN);
     if(useMaxPly) header.push(COL_PLY_MAX);
@@ -624,6 +658,8 @@
   btnOpen.addEventListener('click', openCSV);
   btnClearPutaway.addEventListener('click', clearPutaway);
   btnPutaway.addEventListener('click', downloadPutaway);
+
+  btnBin.addEventListener('click', downloadBinUpdates);
   btnWeight.addEventListener('click', downloadWeightUpdates);
   btnMinMax.addEventListener('click', downloadMinMaxUpdates);
 
